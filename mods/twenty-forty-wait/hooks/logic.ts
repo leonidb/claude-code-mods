@@ -58,15 +58,6 @@ export const INITIAL_MODEL: Model = frozen({
   isFaulted: false,
 })
 
-/** The mod's settings, as its `userConfig` gives them. */
-export type Settings = { activity: '2048' | 'none'; summary: boolean }
-
-/** The settings when none are set. */
-export const DEFAULT_SETTINGS: Settings = frozen({
-  activity: '2048',
-  summary: true,
-})
-
 /** A value to keep across sessions, written after the model is committed. */
 export type SaveEffect =
   | { kind: 'save'; key: 'isOn'; value: boolean }
@@ -103,7 +94,6 @@ const REASONS: readonly StopReason[] = [
   '',
 ]
 const MODES: readonly Mode[] = ['game', 'input']
-const ACTIVITIES: readonly Settings['activity'][] = ['2048', 'none']
 
 /** A turn this long or longer fades before it locks; a shorter one locks at once. */
 export const LONG_TURN_MS = 10_000
@@ -201,18 +191,6 @@ export function gameOf(raw: unknown): Game {
   }
 }
 
-/** The settings from `register`'s options; an unknown value is its default. */
-export function settingsOf(options: unknown): Settings {
-  const given = isRecord(options) ? options : {}
-  return {
-    activity: oneOf(given.activity, ACTIVITIES, DEFAULT_SETTINGS.activity),
-    summary:
-      typeof given.summary === 'boolean'
-        ? given.summary
-        : DEFAULT_SETTINGS.summary,
-  }
-}
-
 /**
  * The best score to keep: the higher of the kept one and the current one. A
  * kept value that isn't a score counts as none, so the result is never below
@@ -292,7 +270,6 @@ export function afterToggle(model: Model): Step {
  * a session that has none yet takes it from the store, on if it was last
  * switched on. The best score is the higher of the kept one and the model's,
  * and a best the store doesn't have yet (its save failed) is saved again.
- * With no game, a turn already handed back is locked from now on.
  * A session with no game yet gets a new one; a reload keeps the game as it
  * was, with no new tile. A reload also drops any board that held the keys, so
  * the keys are the prompt's and the board is retired, and new code gets a
@@ -302,19 +279,11 @@ export function afterRestore(
   model: Model,
   kept: { isOn: unknown; best: unknown },
   random: Random,
-  settings: Settings = DEFAULT_SETTINGS,
 ): Step {
   const best = bestOf(kept.best, model.game.best)
-  // With no game a handed-back turn shows its card at once, so its lock takes
-  // effect now and holds, also if the setting goes back to the game.
-  const isHandedBack =
-    settings.activity === 'none' &&
-    model.turn.phase === 'done' &&
-    model.turn.isShown
   return {
     model: {
       ...model,
-      turn: isHandedBack ? { ...model.turn, lockAt: 0 } : model.turn,
       isOn: model.isSeeded ? model.isOn : kept.isOn === true,
       isSeeded: true,
       mode: 'input',
@@ -487,27 +456,20 @@ export function afterToolDone(model: Model, done: ToolDone): Step {
 }
 
 /**
- * The main loop's turn ends, for any reason: the turn is handed back. A turn
- * of 10 s or longer that ended on its own while the game has the keys, and
- * isn't over, fades for 5 s, the game still playable, and then locks; any
- * other turn locks at once (see `isLocked`): a shorter or interrupted one,
- * one that ends in input mode or on a finished game, and every turn when
- * there is no game to finish a move in. At
- * the lock the keys go to the prompt and the board is retired. The turn's
- * length is the longer of what the band saw and what Claude Code reports, so
- * a turn followed from mid-way is timed whole. A long turn that ended
- * normally with a reply asks the model, once, for the card's summary, when
- * the setting allows it. The late end of an older turn (one that began before
- * the turn handed back ended), a repeated end, subagent turns, and turns
- * while the band is off change nothing; a turn that began after, whose start
- * went unseen, is handed back as usual, after any lock that came due before
- * it.
+ * The main loop's turn ends, for any reason: the turn is handed back. A turn of
+ * 10 s or longer that ended on its own while the game has the keys, and isn't
+ * over, fades for 5 s, the game still playable, and then locks; any other turn
+ * locks at once (see `isLocked`): a shorter or interrupted one, one that ends
+ * in input mode or on a finished game. At the lock the keys go to the prompt
+ * and the board is retired. The turn's length is the longer of what the band
+ * saw and what Claude Code reports, so a turn followed from mid-way is timed
+ * whole. A long turn that ended normally with a reply asks the model, once, for
+ * the card's summary. The late end of an older turn (one that began before the
+ * turn handed back ended), a repeated end, subagent turns, and turns while the
+ * band is off change nothing; a turn that began after, whose start went unseen,
+ * is handed back as usual, after any lock that came due before it.
  */
-export function afterTurnEnd(
-  model: Model,
-  end: TurnEnd,
-  settings: Settings = DEFAULT_SETTINGS,
-): Step {
+export function afterTurnEnd(model: Model, end: TurnEnd): Step {
   const isRunning = model.turn.phase === 'running'
   if (
     !model.isOn ||
@@ -544,7 +506,7 @@ export function afterTurnEnd(
       hasAnswer: end.answer.trim().length > 0,
       summary: '',
       next: '',
-      lockAt: isLong && settings.activity === '2048' ? at + FADE_MS : at,
+      lockAt: isLong ? at + FADE_MS : at,
       isShown: true,
     },
   }
@@ -552,7 +514,6 @@ export function afterTurnEnd(
   // any other stop the reason is the news, and its placeholder already says
   // what to do. The reply is counted as the request reads it, in code points.
   const isSummarized =
-    settings.summary &&
     !model.isFaulted &&
     isLong &&
     reason === 'answer' &&
@@ -989,12 +950,11 @@ export type MinimizedView = {
 
 /**
  * What the band draws: nothing, one minimized line, the full band with the
- * board, or, with no game, the live view or the card alone.
+ * board.
  */
 export type BandView =
   | { kind: 'none' }
   | MinimizedView
-  | { kind: 'plain'; status: StatusView | null; card: CardView | null }
   | {
       kind: 'full'
       direction: 'row' | 'column'
@@ -1023,9 +983,6 @@ export const BOARD_COLUMNS = 29
 const BOARD_ROWS = 7
 const SIDE_ROWS = 5
 const MODE_ROWS = 1
-
-/** Rows the band takes with no game: the card, or the shorter live view. */
-export const PLAIN_ROWS = SIDE_ROWS
 
 // What the one-line view says after the state: how to see the rest.
 const ONE_LINE_HINT = ' · more rows show the game'
@@ -1153,25 +1110,14 @@ export function statusOf(
  * draws the board beside the live view or the card, or above it when narrow;
  * without room the whole band shrinks to one line.
  */
-export function bandOf(
-  model: Model,
-  now: number,
-  room: Room,
-  settings: Settings = DEFAULT_SETTINGS,
-): BandView {
+export function bandOf(model: Model, now: number, room: Room): BandView {
   if (!model.isOn || model.isFaulted || room.hasSurvey === true) {
     return { kind: 'none' }
   }
-  const isPlain = settings.activity === 'none'
-  // With no game there is no fade to play through: a turn handed back shows
-  // its card at once, even one that was fading when the setting changed.
-  const isCardShown =
-    isLocked(model, now) ||
-    (isPlain && model.turn.phase === 'done' && model.turn.isShown)
+  const isCardShown = isLocked(model, now)
   const direction = room.columns >= ROW_COLUMNS ? 'row' : 'column'
-  const isRoomy = isPlain
-    ? fits(PLAIN_ROWS, room)
-    : fits(bandRowsOf(direction), room) && room.columns >= BOARD_COLUMNS
+  const isRoomy =
+    fits(bandRowsOf(direction), room) && room.columns >= BOARD_COLUMNS
   if (!isRoomy) {
     // The hint comes right after the state, so the band cuts what follows it
     // rather than the hint. The fade's banner takes the form that leaves the
@@ -1201,15 +1147,6 @@ export function bandOf(
           tail: ONE_LINE_HINT,
         }
   }
-  if (isPlain) {
-    const alone: SideRoom = { width: room.columns, rows: PLAIN_ROWS }
-    return {
-      kind: 'plain',
-      status: isCardShown ? null : statusOf(model, now, alone),
-      card: isCardShown ? cardOf(model.turn, alone) : null,
-    }
-  }
-  const isLockedNow = isCardShown
   // Beside the board the card has the board's rows, so the board and the
   // card keep their height; under it, the card's own, at the band's width.
   const side: SideRoom =
@@ -1219,8 +1156,8 @@ export function bandOf(
   return {
     kind: 'full',
     direction,
-    status: isLockedNow ? null : statusOf(model, now, side),
-    card: isLockedNow ? cardOf(model.turn, side) : null,
+    status: isCardShown ? null : statusOf(model, now, side),
+    card: isCardShown ? cardOf(model.turn, side) : null,
     board: boardOf(model.game, fadeOf(model, now)),
     boardKey: boardKeyOf(model),
     count: model.board.count,
