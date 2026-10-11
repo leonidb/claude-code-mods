@@ -1,0 +1,5 @@
+# Bun compiles the board widget for its specs as Claude Code does: JSX
+# through the global h.
+jsx = "react"
+jsxFactory = "h"
+jsxFragment = "Fragment"

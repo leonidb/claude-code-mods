@@ -1,0 +1,14 @@
+{
+  "name": "leonidb",
+  "owner": {
+    "name": "Leonid Bakaleynik"
+  },
+  "description": "Claude Code mods, starting with Twenty Forty-Wait: a 2048 game above the prompt to keep your attention in Claude Code while it works.",
+  "plugins": [
+    {
+      "name": "twenty-forty-wait",
+      "source": "./mods/twenty-forty-wait",
+      "category": "productivity"
+    }
+  ]
+}

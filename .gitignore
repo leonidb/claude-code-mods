@@ -1,0 +1,8 @@
+.claude/
+# Written by Claude Code beside a mod each time it loads one.
+**/.claude-plugin/types/
+.DS_Store
+.idea/
+node_modules/
+*.log
+.env*

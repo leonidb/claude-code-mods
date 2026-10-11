@@ -1,0 +1,4 @@
+{
+  "description": "A game above the prompt: what Claude is doing, 2048 while it works, and a hand-back card when it stops.",
+  "modules": ["./register.tsx"]
+}
