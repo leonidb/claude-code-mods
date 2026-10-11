@@ -2,7 +2,7 @@
 
 Don't let your attention wander off while waiting for Claude Code's answer.
 
-<!-- ![2048 above the prompt while Claude works, then the your-turn card](demo.gif) -->
+![The your-turn card beside the locked 2048 board, above the Claude Code prompt](../../assets/twenty-forty-wait/your-turn.png)
 
 A small 2048 game sits right above the prompt, so you can stay in Claude Code
 while it works instead of switching to another tab. Claude's output still
