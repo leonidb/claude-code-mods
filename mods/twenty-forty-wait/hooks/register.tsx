@@ -26,7 +26,6 @@ import {
   isTicking,
   isTimeShown,
   modelOf,
-  settingsOf,
   toggleNoteOf,
   toolSucceeded,
   turnKeyOf,
@@ -162,7 +161,8 @@ async function settled(
 }
 
 // Carries out a commit's effects: durable writes in line behind earlier
-// ones, and summary calls on their own. Resolves once the writes have landed.
+// ones, and summary calls on their own, none once a failure stopped the band,
+// even if that couldn't be written. Resolves once the writes have landed.
 function runEffects(
   $: EngineInterface,
   load: Load,
@@ -175,7 +175,7 @@ function runEffects(
         saves.push(effect)
         break
       case 'summarize':
-        summarize($, load, effect)
+        if (!load.isFaulted) summarize($, load, effect)
         break
     }
   }
@@ -281,8 +281,7 @@ async function keptValue($: EngineInterface, key: string): Promise<unknown> {
  * unheld; the ticker moves the band's time, and the band above the prompt
  * draws it.
  */
-export const register: Register = (on, options) => {
-  const settings = settingsOf(options)
+export const register: Register = on => {
   const load: Load = {
     section: Promise.resolve(),
     writes: new Map(),
@@ -312,7 +311,7 @@ export const register: Register = (on, options) => {
         }
         const at = await $.clock.now()
         const step = await commit($, current =>
-          afterRestore(current, kept, Math.random, settings),
+          afterRestore(current, kept, Math.random),
         )
         void runEffects($, load, step.effects)
         load.isFaulted = false
@@ -383,18 +382,14 @@ export const register: Register = (on, options) => {
   on('turn.complete', ($, e, next) => {
     observe($, load, async at => {
       const step = await commit($, current =>
-        afterTurnEnd(
-          current,
-          {
-            turnId: e.turnId,
-            reason: e.reason,
-            answer: e.answer,
-            durationMs: e.durationMs,
-            at,
-            agentId: e.agentId,
-          },
-          settings,
-        ),
+        afterTurnEnd(current, {
+          turnId: e.turnId,
+          reason: e.reason,
+          answer: e.answer,
+          durationMs: e.durationMs,
+          at,
+          agentId: e.agentId,
+        }),
       )
       void runEffects($, load, step.effects)
       await settled($, load, at)
@@ -473,17 +468,12 @@ export const register: Register = (on, options) => {
       return next(e)
     }
     const current = modelOf(await read($, model))
-    const view = bandOf(
-      current,
-      await read($, now),
-      {
-        columns: e.props.bodyColumns,
-        maxRows: e.props.maxRows,
-        isFullscreen: e.viewport?.isFullscreen,
-        hasSurvey: e.props.hasSurvey,
-      },
-      settings,
-    )
+    const view = bandOf(current, await read($, now), {
+      columns: e.props.bodyColumns,
+      maxRows: e.props.maxRows,
+      isFullscreen: e.viewport?.isFullscreen,
+      hasSurvey: e.props.hasSurvey,
+    })
     // Drawing can't write; a board that held the keys but isn't drawn is
     // handed back right after, once per board.
     const epoch = handoffOf(current, view)

@@ -31,29 +31,22 @@ Needs Claude Code 2.1.289 or later. Tested with Claude Code 2.1.296.
 - **When Claude stops:** a long turn gets 5 seconds to finish your move, then the board locks until your next prompt.
 - **One game per session.** Your best score is kept.
 
-## Settings
-
-| Setting    | Values         | Default |                                                        |
-| ---------- | -------------- | ------- | ------------------------------------------------------ |
-| `activity` | `2048`, `none` | `2048`  | `none` shows the live view and the card, with no game. |
-| `summary`  | on, off        | on      | The card's summary. Off uses a fixed line.             |
-
-Change them in `/plugin` → **Installed** → Twenty Forty-Wait → **Configure options**.
-
 ## What leaves your machine
 
-Only the optional summary, and only Claude's own words. With `summary` on,
-after a turn of 10 seconds or longer that ends normally with a reply of 200
-characters or more, that reply is sent to Claude Haiku, with fixed
-instructions, to write the card's summary: the whole reply if it's 8,000
-characters or less, otherwise its first 2,000 and last 6,000 characters. That
-text can include anything Claude wrote in the reply, such as file paths,
-quoted output or code. It goes through the same connection as the rest of
-your Claude Code session (Anthropic, or the provider or gateway your session
-uses, such as Bedrock or Vertex), and adds a little to your usage.
+Only Claude's own words, for the card's summary. After a turn of 10 seconds
+or longer that ends normally with a reply of 200 characters or more, that
+reply is sent to Claude Haiku, with fixed instructions, to write the summary:
+the whole reply if it's 8,000 characters or less, otherwise its first 2,000
+and last 6,000 characters. That text can include anything Claude wrote in the
+reply, such as file paths, quoted output or code. It goes through the same
+connection as the rest of your Claude Code session (Anthropic, or the
+provider or gateway your session uses, such as Bedrock or Vertex), and adds a
+little to your usage.
 
 Nothing else from the session is sent: not your prompts, tool calls or files.
-With `summary` off, nothing is sent at all.
+Nothing at all is sent before your first `/fortywait`, or after you run it
+again. A reply already on its way to Haiku at that moment can't be called
+back.
 
 The mod keeps two values in Claude Code's plugin storage: whether the game is
 on, and your best score.

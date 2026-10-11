@@ -3,7 +3,12 @@ import { describe, expect, test } from 'bun:test'
 import { bandTree } from '../../hooks/band'
 import type { BandElements } from '../../hooks/band'
 import { boardOf } from '../../hooks/logic'
-import type { MinimizedView, ModeView } from '../../hooks/logic'
+import type {
+  CardView,
+  MinimizedView,
+  ModeView,
+  StatusView,
+} from '../../hooks/logic'
 
 // The band's drawing, run against elements that draw plain data.
 type Node = {
@@ -26,6 +31,33 @@ const UI = {
   Text: 'Text',
   Client: 'Client',
 } as unknown as BandElements
+
+const GAME = {
+  cells: [2, 4, ...new Array<number>(14).fill(0)],
+  score: 0,
+  best: 0,
+  isOver: false,
+  hasWon: false,
+  moves: 0,
+}
+
+// The full band beside the board, behind the card or under the live view,
+// with no mode row, so its texts are the card's or the live view's alone.
+function besideBoard(view: {
+  card: CardView | null
+  status: StatusView | null
+}): unknown {
+  return bandTree(UI, {
+    kind: 'full',
+    direction: 'row',
+    ...view,
+    board: boardOf(GAME, 1),
+    boardKey: 'board-1',
+    count: 0,
+    frame: 'dim',
+    mode: { line: '', isActive: false },
+  })
+}
 
 // Every text in the tree, with the style it asks for: a Text's own props
 // over those of the Text it sits in.
@@ -103,7 +135,7 @@ describe('the card and the live view, row by row', () => {
       rows: ['One two three', 'four. Five six', 'seven.'],
       files: null,
     }
-    const tree = bandTree(UI, { kind: 'plain', status: null, card })
+    const tree = besideBoard({ status: null, card })
     expect(rowsOf(tree)).toEqual([
       ['✓ YOUR TURN · 30s · 2 tools · 1 file', 'truncate-end'],
       ['One two three', 'truncate-end'],
@@ -123,7 +155,7 @@ describe('the card and the live view, row by row', () => {
       current: ['one two', 'three four'],
       before: ['→ five six', 'seven'],
     }
-    const tree = bandTree(UI, { kind: 'plain', status, card: null })
+    const tree = besideBoard({ status, card: null })
     expect(rowsOf(tree)).toEqual([
       ['locks in 3s', 'truncate-end'],
       ['one two', 'truncate-end'],
@@ -135,14 +167,6 @@ describe('the card and the live view, row by row', () => {
 })
 
 describe('the mode row', () => {
-  const GAME = {
-    cells: [2, 4, ...new Array<number>(14).fill(0)],
-    score: 0,
-    best: 0,
-    isOver: false,
-    hasWon: false,
-    moves: 0,
-  }
   // What the full band draws, top to bottom, beside the board or under it:
   // the board with the card, then the mode row, if any.
   const partsOf = (mode: ModeView, direction: 'row' | 'column') =>

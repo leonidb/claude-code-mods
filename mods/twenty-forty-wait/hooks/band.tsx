@@ -18,9 +18,8 @@ export type BandElements = Pick<
 /**
  * Draws the band's view as it is: the board beside the card or the live
  * view, or above it when narrow, and the mode row at the bottom, unless it
- * has nothing to say; with no game, the card or the live view alone. Each
- * text is one row of its own, cut at the band's width, so the band is never
- * taller than its layout. Nothing is decided here.
+ * has nothing to say. Each text is one row of its own, cut at the band's
+ * width, so the band is never taller than its layout. Nothing is decided here.
  */
 export function bandTree(
   ui: BandElements,
@@ -33,17 +32,6 @@ export function bandTree(
         {headTree(ui, view.tone, view.head)}
         <Text dimColor>{view.tail}</Text>
       </Text>
-    )
-  }
-  if (view.kind === 'plain') {
-    return (
-      <Box flexDirection="column" flexGrow={1}>
-        {view.card !== null
-          ? cardTree(ui, view.card)
-          : view.status !== null
-            ? statusTree(ui, view.status)
-            : null}
-      </Box>
     )
   }
   const { Client } = ui

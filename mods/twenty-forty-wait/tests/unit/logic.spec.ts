@@ -2,9 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   BOARD_BACKLOG,
-  PLAIN_ROWS,
   BOARD_COLUMNS,
-  DEFAULT_SETTINGS,
   EMPTY_GAME,
   INITIAL_MODEL,
   afterDialog,
@@ -41,7 +39,6 @@ import {
   modelOf,
   paragraphOf,
   placeholderOf,
-  settingsOf,
   statusOf,
   summaryOf,
   summaryRequestOf,
@@ -238,33 +235,6 @@ describe('gameOf', () => {
     expect(game.score).toBe(0)
     expect(game.best).toBe(0)
     expect(game.moves).toBe(0)
-  })
-})
-
-describe('settingsOf', () => {
-  test('nothing set means the defaults', () => {
-    for (const options of [undefined, null, {}, 'none', []]) {
-      expect(settingsOf(options)).toEqual(DEFAULT_SETTINGS)
-    }
-    expect(DEFAULT_SETTINGS).toEqual({ activity: '2048', summary: true })
-  })
-
-  test('valid values are taken as given', () => {
-    expect(settingsOf({ activity: 'none', summary: false })).toEqual({
-      activity: 'none',
-      summary: false,
-    })
-  })
-
-  test('an unknown value falls back to its default on its own', () => {
-    expect(settingsOf({ activity: 'tetris', summary: false })).toEqual({
-      activity: '2048',
-      summary: false,
-    })
-    expect(settingsOf({ activity: 'none', summary: 'false' })).toEqual({
-      activity: 'none',
-      summary: true,
-    })
   })
 })
 
@@ -947,6 +917,23 @@ describe('a lock across a reload or a switch-off', () => {
     ).model
     expect(isLocked(reloaded, 3000)).toBe(true)
     expect(reloaded.turn).toEqual(locked.turn)
+  })
+
+  test('a reload keeps a running, fading or idle turn as it was, and an off band off', () => {
+    const kept = { isOn: true, best: 0 }
+    const running = started(ON, 1000)
+    expect(afterRestore(running, kept, first).model.turn).toEqual(running.turn)
+    const fading = ended(started({ ...ON, mode: 'game' }, 1000), { at: 31_000 })
+    const reloaded = afterRestore(fading, kept, first).model
+    expect(reloaded.turn).toEqual(fading.turn)
+    expect(reloaded.turn.lockAt).toBe(36_000)
+    expect(afterRestore(ON, kept, first).model.turn).toEqual(ON.turn)
+    const off = { ...ended(started(ON, 1000)), isOn: false }
+    const restored = afterRestore(off, kept, first).model
+    expect(restored.isOn).toBe(false)
+    expect(bandOf(restored, 40_000, { columns: 100, maxRows: 48 }).kind).toBe(
+      'none',
+    )
   })
 
   test('switching off and on again starts from an idle turn, with no stale lock', () => {
@@ -2435,22 +2422,15 @@ describe('tiles on a terminal with only 256 colours', () => {
 })
 
 describe('asking the model for the card’s summary', () => {
-  const summarized = (
-    change: Partial<TurnEnd> = {},
-    settings = DEFAULT_SETTINGS,
-  ) =>
-    afterTurnEnd(
-      started(ON, 1000),
-      {
-        turnId: 't1',
-        reason: 'answer',
-        answer: REPLY,
-        durationMs: 0,
-        at: 31_000,
-        ...change,
-      },
-      settings,
-    ).effects
+  const summarized = (change: Partial<TurnEnd> = {}) =>
+    afterTurnEnd(started(ON, 1000), {
+      turnId: 't1',
+      reason: 'answer',
+      answer: REPLY,
+      durationMs: 0,
+      at: 31_000,
+      ...change,
+    }).effects
 
   test('a long turn that ended normally with a reply asks once, for that turn', () => {
     expect(summarized()).toEqual([
@@ -2488,24 +2468,26 @@ describe('asking the model for the card’s summary', () => {
     }
   })
 
-  test('a short, interrupted or empty turn, or the setting off, asks nothing', () => {
+  test('a short, interrupted or empty turn asks nothing', () => {
     expect(summarized({ at: 10_999 })).toEqual([])
     expect(summarized({ at: 11_000 })).toHaveLength(1)
     expect(summarized({ reason: 'aborted' })).toEqual([])
     expect(summarized({ answer: '  ' })).toEqual([])
-    expect(summarized({}, { ...DEFAULT_SETTINGS, summary: false })).toEqual([])
     expect(summarized({ agentId: 'sub-1' })).toEqual([])
   })
 
-  test('while the band is off, nothing is asked', () => {
-    const off = { ...started(ON, 1000), isOn: false }
+  // Rule change: the summary can't be switched off; the band off is the only
+  // way to send nothing. The same end, on, asks once.
+  test('while the band is off, nothing is asked, even for a long turn with a long reply', () => {
     const end = {
       turnId: 't1',
       reason: 'answer',
-      answer: 'Done.',
+      answer: REPLY,
       durationMs: 60_000,
       at: 61_000,
     }
+    expect(afterTurnEnd(started(ON, 1000), end).effects).toHaveLength(1)
+    const off = { ...started(ON, 1000), isOn: false }
     expect(afterTurnEnd(off, end).effects).toEqual([])
   })
 
@@ -2738,141 +2720,7 @@ describe('the next step wraps with the gist, beside or under the board', () => {
   })
 })
 
-describe('no game: the live view and the card alone', () => {
-  const NONE = { ...DEFAULT_SETTINGS, activity: 'none' as const }
-  const room = { columns: 100, maxRows: 48 }
-  // A turn played through with the game on, so with 2048 its end would fade.
-  const PLAYED = started({ ...ON, mode: 'game' }, 1000)
-  const end = (settings = DEFAULT_SETTINGS, model = started(ON, 1000)) =>
-    afterTurnEnd(
-      model,
-      {
-        turnId: 't1',
-        reason: 'answer',
-        answer: REPLY,
-        durationMs: 0,
-        at: 31_000,
-      },
-      settings,
-    )
-
-  test('the activity is 2048 unless set to none', () => {
-    expect(settingsOf({}).activity).toBe('2048')
-    expect(settingsOf({ activity: 'none' }).activity).toBe('none')
-    expect(settingsOf({ activity: 'tetris' }).activity).toBe('2048')
-  })
-
-  test('a long turn locks at once, with no fade, and is still summarized', () => {
-    const step = end(NONE, PLAYED)
-    expect(step.model.turn.lockAt).toBe(0)
-    expect(isLocked(step.model, 31_000)).toBe(true)
-    expect(step.effects).toHaveLength(1)
-    expect(end(DEFAULT_SETTINGS, PLAYED).model.turn.lockAt).toBe(36_000)
-  })
-
-  test('no board and no mode row: the live view while Claude works, the card at its stop', () => {
-    const running = bandOf(started(ON, 1000), 5000, room, NONE)
-    expect(running.kind).toBe('plain')
-    expect(running.kind === 'plain' && running.status?.headline).toContain(
-      'Claude is working',
-    )
-    expect(JSON.stringify(running)).not.toContain('board')
-    const done = bandOf(end(NONE).model, 31_000, room, NONE)
-    expect(done.kind === 'plain' && done.card?.heading).toBe('✓ YOUR TURN')
-  })
-
-  test('a turn that was fading when the setting changed shows its card at once', () => {
-    const fading = end(DEFAULT_SETTINGS, PLAYED).model
-    expect(isLocked(fading, 32_000)).toBe(false)
-    const view = bandOf(fading, 32_000, room, NONE)
-    expect(view.kind === 'plain' && view.card?.heading).toBe('✓ YOUR TURN')
-  })
-
-  test('the band takes the card’s 5 rows; with fewer it shrinks to one line', () => {
-    expect(PLAIN_ROWS).toBe(5)
-    const kind = (maxRows: number, isFullscreen: boolean) =>
-      bandOf(
-        started(ON, 1000),
-        5000,
-        { columns: 40, maxRows, isFullscreen },
-        NONE,
-      ).kind
-    expect([kind(5, true), kind(4, true)]).toEqual(['plain', 'minimized'])
-    expect([kind(15, false), kind(14, false)]).toEqual(['plain', 'minimized'])
-  })
-
-  test('a board that held the keys is handed back, since none is drawn', () => {
-    const playing = {
-      ...started(ON, 1000),
-      mode: 'game' as const,
-      board: { epoch: 4, count: 0 },
-    }
-    expect(handoffOf(playing, bandOf(playing, 5000, room, NONE))).toBe(4)
-  })
-})
-
-describe('a setting change, there and back', () => {
-  const NONE = { ...DEFAULT_SETTINGS, activity: 'none' as const }
-  const kept = { isOn: true, best: 0 }
-  const fading = {
-    ...ended(
-      started(
-        { ...ON, mode: 'game' as const, board: { epoch: 2, count: 3 } },
-        1000,
-      ),
-      {
-        at: 31_000,
-      },
-    ),
-    mode: 'game' as const,
-  }
-
-  test('switching to none mid-fade locks the turn for good: back on 2048 it stays locked', () => {
-    expect(fading.turn.lockAt).toBe(36_000)
-    const none = afterRestore(fading, kept, first, NONE).model
-    expect(none.turn.lockAt).toBe(0)
-    expect(none.mode).toBe('input')
-    expect(none.board).toEqual({ epoch: 3, count: 0 })
-    expect(none.game).toEqual(fading.game)
-    const back = afterRestore(none, kept, first).model
-    expect(isLocked(back, 33_000)).toBe(true)
-    expect(isTicking(back, 33_000)).toBe(false)
-    const view = bandOf(back, 33_000, { columns: 100, maxRows: 48 })
-    expect(view.kind === 'full' && view.card?.heading).toBe('✓ YOUR TURN')
-    const click = afterBoardPost(
-      back,
-      boardKeyOf(back),
-      { count: 2, inputs: [CLICK, key('left')] },
-      33_000,
-      first,
-    ).model
-    expect(click.game).toEqual(back.game)
-    expect(click.mode).toBe('input')
-  })
-
-  test('a running turn, an idle band and an off band come through unchanged', () => {
-    const running = started(ON, 1000)
-    expect(afterRestore(running, kept, first, NONE).model.turn).toEqual(
-      running.turn,
-    )
-    const off = { ...ended(started(ON, 1000)), isOn: false }
-    const restored = afterRestore(
-      off,
-      { isOn: true, best: 0 },
-      first,
-      NONE,
-    ).model
-    expect(restored.isOn).toBe(false)
-    expect(
-      bandOf(restored, 40_000, { columns: 100, maxRows: 48 }, NONE).kind,
-    ).toBe('none')
-    expect(afterRestore(ON, kept, first, NONE).model.turn).toEqual(ON.turn)
-  })
-})
-
 describe('the whole branch, seams', () => {
-  const NONE = { ...DEFAULT_SETTINGS, activity: 'none' as const }
-
   test('once a turn is handed back, a late end of an older turn changes nothing', () => {
     const t1 = ended(started(ON, 1000, 't1'), { turnId: 't1', at: 31_000 })
     const t2 = ended(started(t1, 40_000, 't2'), { turnId: 't2', at: 70_000 })
@@ -2903,23 +2751,6 @@ describe('the whole branch, seams', () => {
       phase: 'done',
       endedAt: 100_000,
     })
-  })
-
-  test('a lock latched under none holds through a late summary and a dialog, back on 2048', () => {
-    const fading = ended(started({ ...ON, mode: 'game' }, 1000), { at: 31_000 })
-    const back = afterRestore(
-      afterRestore(fading, { isOn: true, best: 0 }, first, NONE).model,
-      { isOn: true, best: 0 },
-      first,
-    ).model
-    const summarized = afterSummary(back, keyOf(back), {
-      isAnswered: true,
-      text: 'Ran it.\nCheck the output.',
-    }).model
-    const asked = afterDialog(summarized).model
-    expect(asked.turn.lockAt).toBe(0)
-    expect(isLocked(asked, 32_000)).toBe(true)
-    expect(asked.turn.summary).toBe('Ran it.')
   })
 })
 
@@ -3261,22 +3092,6 @@ describe('the card wraps the summary over the rows it has', () => {
     }
   })
 
-  test('with no game the card wraps at the band’s width, within its 5 rows', () => {
-    const view = bandOf(
-      summarized(GIST),
-      40_000,
-      { columns: 60, maxRows: 48 },
-      {
-        ...DEFAULT_SETTINGS,
-        activity: 'none',
-      },
-    )
-    if (view.kind !== 'plain' || view.card === null) throw new Error('no card')
-    expect(view.card.rows.join(' ')).toBe(textOf(GIST))
-    for (const row of view.card.rows) expect(row.length).toBeLessThanOrEqual(60)
-    expect(rowsIn(view.card)).toBeLessThanOrEqual(5)
-  })
-
   test('a long gist with a short next step still ends on the next step, every word shown', () => {
     const gist = {
       line: 'Moved the payment retries into a background queue with backoff, so failed charges no longer block the checkout pages, receipts or the nightly refund jobs.',
@@ -3318,22 +3133,15 @@ describe('the card wraps the summary over the rows it has', () => {
         const room = { columns, maxRows: 200 }
         const card = bandOf(locked, 40_000, room)
         const fade = bandOf(fading, 32_000, room)
-        const plain = bandOf(locked, 40_000, room, {
-          ...DEFAULT_SETTINGS,
-          activity: 'none',
-        })
         if (card.kind !== 'full' || card.card === null)
           throw new Error('no card')
         if (fade.kind !== 'full' || fade.status === null)
           throw new Error('no fade')
-        if (plain.kind !== 'plain' || plain.card === null)
-          throw new Error('no plain card')
         const side = card.direction === 'row' ? 7 : 5
         expect(rowsIn(card.card)).toBeLessThanOrEqual(side)
         expect(
           1 + fade.status.current.length + fade.status.before.length,
         ).toBeLessThanOrEqual(side)
-        expect(rowsIn(plain.card)).toBeLessThanOrEqual(5)
       }
     }
   })

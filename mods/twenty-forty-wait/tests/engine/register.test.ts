@@ -52,6 +52,9 @@ function worldOf(
     failingReads: new Set<string>(),
     heldReads: new Map<string, Promise<void>>(),
     failingWrites: new Set<string>(),
+    // Every write of the model is refused: a compare-and-set miss each time,
+    // so the write gives up after its retries.
+    isModelUnwritable: false,
     heldWrites: new Map<string, Promise<void>>(),
     heldAnswer: undefined as Promise<void> | undefined,
     // Holds only the answer to a write of this key, when set.
@@ -95,6 +98,9 @@ function worldOf(
     const before = heard.heldStateWrite
     heard.heldStateWrite = undefined
     await before
+    if (isModel && heard.isModelUnwritable) {
+      return { value: { isSet: false, version: 0 } } as never
+    }
     heard.stateWrites += 1
     const written = await next(e)
     if (
@@ -1657,17 +1663,96 @@ describe('the summary on the card', () => {
     expect(heard.modelCalls).toBe(0)
   })
 
+  // Rule change: the summary can't be switched off; the band off is the only
+  // way to send nothing. On, the same long turn asks once (the first test of
+  // this group).
+  test('while the band was never switched on, no model is ever asked', async ($, on) => {
+    const heard = worldOf(on)
+    await start($)
+    const stateWrites = heard.stateWrites
+    await longTurn($ as never, heard)
+    await heard.clock.settle()
+    expect(heard.modelCalls).toBe(0)
+    expect(heard.stateWrites).toBe(stateWrites)
+    expect(heard.writes).toEqual([])
+  })
+
+  test('switched off before its turn ends, no model is asked for it', async ($, on) => {
+    const heard = worldOf(on)
+    await start($)
+    await toggle($)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await heard.clock.advance(60_000)
+    await toggle($)
+    const stateWrites = heard.stateWrites
+    const writes = heard.writes.length
+    await $.turn.complete(ending('t1', { answer: `I ${REPLY}` }))
+    await heard.clock.settle()
+    expect(heard.modelCalls).toBe(0)
+    expect(heard.stateWrites).toBe(stateWrites)
+    expect(heard.writes).toHaveLength(writes)
+  })
+
+  // A failure stops the band even when the stop itself can't be written down:
+  // the model still says all is well, but no reply goes to the model. The
+  // turn's start is unseen either way, so it's long only by the length Claude
+  // Code reports; with no failure, the same end asks once.
+  for (const isFailing of [true, false]) {
+    test(
+      isFailing
+        ? 'stopped by a failure it couldn’t record, the band asks no model'
+        : 'with no failure, the same turn, its start unseen, asks once',
+      async ($, on) => {
+        const heard = worldOf(on)
+        await start($)
+        await toggle($)
+        if (isFailing) {
+          heard.isModelUnwritable = true
+          await $.turn.start({ text: 'go', turnId: 't1' })
+          await heard.clock.settle()
+          heard.isModelUnwritable = false
+          expect(heard.state?.value.isFaulted).toBe(false)
+          expect(
+            await shows(await mounted($), /Claude is working|No activity yet/),
+          ).toBe(false)
+        }
+        await heard.clock.advance(60_000)
+        await $.turn.complete(
+          ending('t1', { answer: `I ${REPLY}`, durationMs: 60_000 }),
+        )
+        await heard.clock.settle()
+        // The end itself was taken: the turn is handed back.
+        expect(heard.state?.value.turn).toMatchObject({
+          turnId: 't1',
+          phase: 'done',
+        })
+        expect(heard.modelCalls).toBe(isFailing ? 0 : 1)
+      },
+    )
+  }
+
+  // Rule change: the settings are gone. Options an older install kept in
+  // settings no longer reach the mod, so they change nothing: the game is
+  // drawn, a long turn played in it fades, and the summary is asked for.
   test(
-    'with the summary off, no model is ever asked',
-    { options: { summary: false } },
+    'options kept from an older install change nothing: the game, the fade and the summary',
+    { options: { activity: 'none', summary: false } },
     async ($, on) => {
       const heard = worldOf(on)
+      heard.modelAnswer = SUMMARY
       await start($)
       await toggle($)
-      await longTurn($ as never, heard)
-      await heard.clock.settle()
-      expect(heard.modelCalls).toBe(0)
-      expect(await shows(await mounted($), /Claude finished/)).toBe(true)
+      await $.turn.start({ text: 'go', turnId: 't1' })
+      const band = await boardBand($)
+      expect(await band.find({ type: 'Client' })).toBeDefined()
+      await clickBoard(band)
+      expect(heard.state?.value.mode).toBe('game')
+      await heard.clock.advance(60_000)
+      await $.turn.complete(ending('t1', { answer: `I ${REPLY}` }))
+      await heard.clock.advance(1_000)
+      await band.redraw()
+      expect(await band.find({ text: /locks in/ })).toBeDefined()
+      expect(heard.modelCalls).toBe(1)
     },
   )
 
@@ -1732,12 +1817,19 @@ describe('the summary on the card', () => {
       release = resolve
     })
     await heard.clock.advance(60_000)
-    await $.turn.complete(ending('t2', { answer: 'Done. Ship it.' }))
+    // A reply long enough to be summarized, so the request is under way when
+    // the band is switched off.
+    await $.turn.complete(ending('t2', { answer: `I ${REPLY}` }))
     await heard.clock.settle()
+    expect(heard.modelCalls).toBe(2)
     await toggle($)
     release()
     await heard.clock.settle()
-    expect(heard.state?.value.turn.summary).toBe('')
+    expect(heard.state?.value.turn).toMatchObject({
+      turnId: 't2',
+      phase: 'done',
+      summary: '',
+    })
   })
 
   test('only the beginning and the end of Claude’s reply leave: not its middle, the prompt, the tools or the files', async ($, on) => {
@@ -1964,7 +2056,7 @@ async function rowsOf(band: BoardBand): Promise<string[]> {
 }
 
 // A session that was playing while a long turn's end faded, kept in state:
-// what a setting change, which reloads the mod, starts from.
+// what a reload of the mod starts from.
 const FADING: Kept = {
   shape: MODEL_SHAPE,
   value: {
@@ -1995,75 +2087,8 @@ const FADING: Kept = {
   },
 }
 
-describe('no game: activity none', () => {
-  test(
-    'no board is drawn: the live view uses the band alone',
-    { options: { activity: 'none' } },
-    async ($, on) => {
-      const heard = worldOf(on)
-      await start($)
-      await toggle($)
-      await $.turn.start({ text: 'go', turnId: 't1' })
-      await heard.clock.settle()
-      const band = await boardBand($)
-      expect(await band.find({ type: 'Client' })).toBeUndefined()
-      expect(await shows(band as never, /Claude is working/)).toBe(true)
-      expect(await rowsOf(band)).toEqual([
-        '● Claude is working · 0s · 0 tool calls',
-        'thinking…',
-      ])
-    },
-  )
-
-  test(
-    'when Claude stops, the card shows at once, with no fade',
-    { options: { activity: 'none' } },
-    async ($, on) => {
-      const heard = worldOf(on)
-      await start($)
-      await toggle($)
-      await longTurn($ as never, heard)
-      await heard.clock.settle()
-      expect(heard.state?.value.turn.lockAt).toBe(0)
-      const band = await boardBand($)
-      expect(await shows(band as never, /✓ YOUR TURN/)).toBe(true)
-      // Rule change: the placeholder is one row now, within the 5 rows.
-      expect(await rowsOf(band)).toEqual([
-        '✓ YOUR TURN',
-        '1m 00s · 0 tool calls · 0 files changed',
-        'Claude finished — your turn: read the reply.',
-        '',
-      ])
-      // The empty files row takes no row in the terminal.
-      expect(await heightOf(band, await band.drawn())).toBe(3)
-    },
-  )
-
-  test(
-    'switching to none mid-fade keeps on/off, the lock and the game, and shows the card',
-    { options: { activity: 'none' } },
-    async ($, on) => {
-      const heard = worldOf(on, { isOn: true, best: 64 }, FADING)
-      await start($)
-      await heard.clock.settle()
-      expect(heard.state?.value).toMatchObject({
-        isOn: true,
-        mode: 'input',
-        game: { cells: FADING.value.game.cells, score: 40, best: 64, moves: 9 },
-        turn: { turnId: 't1', phase: 'done', isShown: true, lockAt: 0 },
-        board: { epoch: 3, count: 0 },
-      })
-      const band = await boardBand($)
-      expect(await band.find({ type: 'Client' })).toBeUndefined()
-      expect(await shows(band as never, /✓ YOUR TURN/)).toBe(true)
-      // Locked for good, so nothing keeps time any more.
-      const writes = heard.stateWrites
-      await heard.clock.advance(10_000)
-      expect(heard.stateWrites).toBe(writes)
-    },
-  )
-
-  test('with 2048, a game kept from before is shown as it was', async ($, on) => {
+describe('a game kept from before', () => {
+  test('a game kept from before is shown as it was', async ($, on) => {
     const heard = worldOf(on, { isOn: true, best: 64 }, FADING)
     await start($)
     await heard.clock.advance(6_000)
@@ -2977,37 +3002,4 @@ describe('the look of each state, as drawn', () => {
     await heard.clock.advance(5_000)
     expect((await lookOf(band)).styleOf(/^✓ YOUR TURN$/)).toEqual(HEADING)
   })
-
-  test(
-    'with no game, the live view is plain and the card’s heading green, with no warning colour',
-    { options: { activity: 'none' } },
-    async ($, on) => {
-      const heard = worldOf(on)
-      await start($)
-      await toggle($)
-      const band = await boardBand($)
-      expect(
-        (await lookOf(band)).styleOf(
-          /^No activity yet · Claude's work shows here$/,
-        ),
-      ).toEqual(DIM)
-      await $.turn.start({ text: 'go', turnId: 't1' })
-      const working = await lookOf(band)
-      expect(
-        working.styleOf(/^● Claude is working · \d+s · 0 tool calls$/),
-      ).toEqual(ROW)
-      await heard.clock.advance(12_000)
-      await $.turn.complete(ending('t1'))
-      const card = await lookOf(band)
-      expect(card.styleOf(/^✓ YOUR TURN$/)).toEqual(HEADING)
-      expect(
-        [...working.texts, ...card.texts].filter(
-          drawn =>
-            drawn.style.color === 'warning' ||
-            drawn.style.color === 'yellow' ||
-            'backgroundColor' in drawn.style,
-        ),
-      ).toEqual([])
-    },
-  )
 })

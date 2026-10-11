@@ -1,7 +1,7 @@
 {
   "name": "twenty-forty-wait",
   "displayName": "Twenty Forty-Wait",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A 2048 game above the prompt to keep your attention in Claude Code while it works, with a live view of Claude's work and a your-turn card when it stops.",
   "author": {
     "name": "Leonid Bakaleynik"
@@ -9,20 +9,5 @@
   "license": "Apache-2.0",
   "repository": "https://github.com/leonidb/claude-code-mods",
   "homepage": "https://github.com/leonidb/claude-code-mods/tree/main/mods/twenty-forty-wait",
-  "types": "./types/index.d.ts",
-  "userConfig": {
-    "activity": {
-      "type": "string",
-      "title": "Activity while Claude works",
-      "description": "2048 to play a calm game while Claude works, or none for the live view and the card alone.",
-      "options": ["2048", "none"],
-      "default": "2048"
-    },
-    "summary": {
-      "type": "boolean",
-      "title": "Summarize finished turns",
-      "description": "Summarize finished turns with Claude Haiku: Claude's final reply, when it's 200 characters or more, is sent to Haiku (up to 8,000 characters of it) for the your-turn card.",
-      "default": true
-    }
-  }
+  "types": "./types/index.d.ts"
 }
