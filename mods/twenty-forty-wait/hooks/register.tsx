@@ -22,6 +22,7 @@ import {
   bandOf,
   boardPostOf,
   handoffOf,
+  isDealt,
   isReadFirst,
   isTicking,
   isTimeShown,
@@ -53,15 +54,17 @@ const now = atom({ plugin: 'twenty-forty-wait', key: 'now' } as const, 0)
 // One module load's handles. `section` runs every piece of work that reads or
 // writes the model, one after another in the order it came in; `writes`
 // chains the durable writes; `timer` is the ticker while the band needs it.
-// A tick, or a handoff for one board, waits in line at most once, and so do
-// prompt edits that come one after another with nothing between: the edit
-// waiting in line, until it starts or anything else comes in after it.
+// A tick (between faults), a handoff for one board, or a restore the band
+// asked for waits in line at most once, and so do prompt edits that come one
+// after another with nothing between: the edit waiting in line, until it
+// starts or anything else comes in after it.
 type Load = {
   section: Promise<unknown>
   writes: Map<string, Promise<unknown>>
   timer: { cancel: () => void } | undefined
   isTickWaiting: boolean
   handoffWaiting: number | undefined
+  isRestoreWaiting: boolean
   editWaiting: object | undefined
   isFaulted: boolean
   isRestored: boolean
@@ -83,9 +86,10 @@ async function handedBack($: EngineInterface, load: Load): Promise<void> {
 }
 
 // Runs observation work in this load's order, with the time the event came
-// in. The event itself is never held: the hook hands it on at once. Work that
-// fails stops the board in its own place in line, before anything after it,
-// in case the band is stuck.
+// in, after restoring a session whose state Claude Code emptied. The event
+// itself is never held: the hook hands it on at once. Work that fails stops
+// the board in its own place in line, before anything after it, in case the
+// band is stuck.
 function observe(
   $: EngineInterface,
   load: Load,
@@ -95,6 +99,7 @@ function observe(
   load.editWaiting = undefined
   void inOrder(load, async () => {
     try {
+      await rescued($, load)
       await handedBack($, load)
       await work(await arrived)
     } catch {
@@ -104,14 +109,46 @@ function observe(
 }
 
 // Stops the board: the ticker first, and the band stops drawing it, so both
-// hold even if nothing can be written, then the model.
+// hold even if nothing can be written, then the model. The ticker's waiting
+// tick is forgotten, so a later ticker runs even if that tick failed before
+// its work began; a tick still in line runs, beside the later ticker's.
 async function faulted($: EngineInterface, load: Load): Promise<void> {
   load.timer?.cancel()
   load.timer = undefined
+  load.isTickWaiting = false
   load.isFaulted = true
   // The band read nothing while it was hidden, so no write redraws it.
   $.ui.invalidate('ui.render')
   await commit($, afterFault).catch(() => undefined)
+}
+
+// Restores the session's band from what was kept: on or off for a session
+// with no choice of its own, the best score, and a new game for a session
+// with none. The band shows from here on.
+async function restored($: EngineInterface, load: Load): Promise<void> {
+  const kept = {
+    isOn: await keptOn($),
+    best: await keptValue($, 'best'),
+  }
+  const at = await $.clock.now()
+  const step = await commit($, current =>
+    afterRestore(current, kept, Math.random),
+  )
+  void runEffects($, load, step.effects)
+  load.isRestoreWaiting = false
+  load.isFaulted = false
+  load.isRestored = true
+  $.ui.invalidate('ui.render')
+  await settled($, load, at)
+}
+
+// A `/clear`, or a resume inside Claude Code, ends the session: Claude Code
+// empties the mod's session state and no session start follows. A load that
+// has restored and then finds a board with no tiles restores again, as a new
+// session would.
+async function rescued($: EngineInterface, load: Load): Promise<void> {
+  if (!load.isRestored || isDealt(modelOf(await read($, model)).game)) return
+  await restored($, load)
 }
 
 // Applies a transition to the model. A transition that changes nothing
@@ -263,6 +300,12 @@ async function storedOf($: EngineInterface, key: string): Promise<StoreRead> {
   }
 }
 
+// Whether a session with no choice of its own starts with the band on: as
+// `/fortywait` last left it, in any session.
+function keptOn($: EngineInterface): Promise<unknown> {
+  return keptValue($, 'isOn')
+}
+
 // A value kept from an earlier session, or undefined when it can't be read.
 async function keptValue($: EngineInterface, key: string): Promise<unknown> {
   try {
@@ -275,11 +318,11 @@ async function keptValue($: EngineInterface, key: string): Promise<unknown> {
 
 /**
  * Wires the mod into Claude Code. At each session start or reload it offers
- * `/fortywait` and restores the kept choice; `/fortywait` switches the band
- * on or off. Turn, tool and dialog events move the band's model, one after
- * another in the order they came, while each event goes on unchanged and
- * unheld; the ticker moves the band's time, and the band above the prompt
- * draws it.
+ * `/fortywait` and restores the kept choice, and restores again when Claude
+ * Code empties the session's state; `/fortywait` switches the band on or off.
+ * Turn, tool and dialog events move the band's model, one after another in
+ * the order they came, while each event goes on unchanged and unheld; the
+ * ticker moves the band's time, and the band above the prompt draws it.
  */
 export const register: Register = on => {
   const load: Load = {
@@ -288,6 +331,7 @@ export const register: Register = on => {
     timer: undefined,
     isTickWaiting: false,
     handoffWaiting: undefined,
+    isRestoreWaiting: false,
     editWaiting: undefined,
     isFaulted: false,
     isRestored: false,
@@ -305,19 +349,7 @@ export const register: Register = on => {
             'Turn Twenty Forty-Wait on or off: a game above the prompt while Claude works',
           immediate: true,
         })
-        const kept = {
-          isOn: await keptValue($, 'isOn'),
-          best: await keptValue($, 'best'),
-        }
-        const at = await $.clock.now()
-        const step = await commit($, current =>
-          afterRestore(current, kept, Math.random),
-        )
-        void runEffects($, load, step.effects)
-        load.isFaulted = false
-        load.isRestored = true
-        $.ui.invalidate('ui.render')
-        await settled($, load, at)
+        await restored($, load)
       } catch {
         await faulted($, load)
       }
@@ -327,6 +359,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'fortywait' }, async $ => {
     const { step, written } = await inOrder(load, async () => {
+      await rescued($, load)
       const at = await $.clock.now()
       const step = await commit($, afterToggle)
       load.isFaulted = false
@@ -468,6 +501,16 @@ export const register: Register = on => {
       return next(e)
     }
     const current = modelOf(await read($, model))
+    // Claude Code emptied the session's state: drawing can't write, so the
+    // restore runs right after, asked for once until one lands, and Claude
+    // Code draws its own band meanwhile.
+    if (!isDealt(current.game)) {
+      if (!load.isRestoreWaiting) {
+        load.isRestoreWaiting = true
+        $.clock.after(0, () => observe($, load, () => Promise.resolve()))
+      }
+      return next(e)
+    }
     const view = bandOf(current, await read($, now), {
       columns: e.props.bodyColumns,
       maxRows: e.props.maxRows,

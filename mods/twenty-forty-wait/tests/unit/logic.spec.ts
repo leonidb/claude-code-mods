@@ -31,6 +31,7 @@ import {
   fadeOf,
   gameOf,
   handoffOf,
+  isDealt,
   isLocked,
   isReadFirst,
   isTicking,
@@ -400,6 +401,30 @@ describe('afterRestore', () => {
     expect(
       afterRestore(INITIAL_MODEL, { isOn: true, best: 9 }, first).effects,
     ).toEqual([])
+  })
+})
+
+describe('isDealt', () => {
+  test('a board has tiles once dealt, and play, a finished game or a reload never takes the last away', () => {
+    expect(isDealt(EMPTY_GAME)).toBe(false)
+    expect(isDealt(INITIAL_MODEL.game)).toBe(false)
+    const dealt = afterRestore(INITIAL_MODEL, { isOn: true, best: 0 }, first)
+      .model.game
+    expect(isDealt(dealt)).toBe(true)
+    const lone = { ...EMPTY_GAME, cells: [2, 2, ...EMPTY_GAME.cells.slice(2)] }
+    expect(isDealt(played(lone, 'left', first))).toBe(true)
+    const over = {
+      ...GAME,
+      cells: [2, 4, 2, 4, 4, 2, 4, 2, 2, 4, 2, 4, 4, 2, 4, 2],
+      isOver: true,
+    }
+    expect(isDealt(over)).toBe(true)
+    const reloaded = afterRestore(
+      modelWith({ isSeeded: true, game: GAME }),
+      { isOn: true, best: 0 },
+      first,
+    ).model.game
+    expect(isDealt(reloaded)).toBe(true)
   })
 })
 

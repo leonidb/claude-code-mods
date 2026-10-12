@@ -18,7 +18,8 @@ let settle: () => Promise<void> = () => Promise.resolve()
 // previous session left it. `state` is the model the mod last wrote to the
 // session state, and `olderState` what was there before the mod loaded. A test
 // can make store reads fail or wait, make a store write fail or wait, and hold
-// back the answer to the next state write or command registration.
+// back the answer to the next state write or command registration. Once
+// `clear` ran, the world answers the mod's session state itself.
 function worldOf(
   on: On,
   kept: Record<string, unknown> = {},
@@ -26,6 +27,8 @@ function worldOf(
 ) {
   const heard = {
     store: new Map<string, unknown>(Object.entries(kept)),
+    // Each key read from the store, in order.
+    storeReads: [] as string[],
     writes: [] as { key: string; value: unknown }[],
     commands: [] as unknown[],
     logs: [] as string[],
@@ -63,12 +66,19 @@ function worldOf(
     heldStateWrite: undefined as Promise<void> | undefined,
     heldRegistration: undefined as Promise<void> | undefined,
     state: undefined as Kept | undefined,
-    clock: mock.clock(on),
+    // The session state after a `clear`, and the last version written.
+    cleared: undefined as
+      Map<string, { value: unknown; version: number }> | undefined,
+    lastVersion: 0,
+    // The periods every interval of the mod's has asked for, counted.
+    periods: 0,
+    clock: mock.clock(periodsCounted(on, () => (heard.periods += 1))),
   }
   let older = olderState
   settle = () => heard.clock.settle()
   on('store.get', async ($, e) => {
     const key = (e as { key: string }).key
+    heard.storeReads.push(key)
     if (heard.failingReads.has(key)) throw new Error('store unavailable')
     await heard.heldReads.get(key)
     return { value: heard.store.get(key) } as never
@@ -85,6 +95,12 @@ function worldOf(
   })
   on('state.get', async ($, e, next) => {
     heard.stateReads += 1
+    if (heard.cleared !== undefined) {
+      const value = heard.cleared.get((e as { key: string }).key)
+      return {
+        value: { value: value?.value, version: value?.version ?? 0 },
+      } as never
+    }
     const answer = await next(e)
     // What an older version left stays there until the mod writes over it.
     if ((e as { key?: string }).key !== 'model' || older === undefined) {
@@ -102,7 +118,12 @@ function worldOf(
       return { value: { isSet: false, version: 0 } } as never
     }
     heard.stateWrites += 1
-    const written = await next(e)
+    const written =
+      heard.cleared === undefined
+        ? await next(e)
+        : clearedWrite(heard.cleared, heard, e as StateWrite)
+    const version = (written as { value?: { version?: number } }).value?.version
+    heard.lastVersion = Math.max(heard.lastVersion, version ?? 0)
     if (
       isModel &&
       (written as { value?: { isSet?: boolean } }).value?.isSet === true
@@ -189,6 +210,49 @@ function worldOf(
     return ui.Text({ children: "Claude Code's own band" }) as never
   })
   return heard
+}
+
+// The registrar the mocked clock hooks on, counting each period an interval
+// asks for: `clock.every` is dispatched once per period.
+function periodsCounted(on: On, count: () => void): On {
+  const counted = (event: string, ...rest: unknown[]) => {
+    const hook = rest.at(-1) as (...args: unknown[]) => unknown
+    const wrapped = (...args: unknown[]) => {
+      if (event === 'clock.every') count()
+      return hook(...args)
+    }
+    return (on as (...args: unknown[]) => unknown)(
+      event,
+      ...rest.slice(0, -1),
+      wrapped,
+    )
+  }
+  return counted as On
+}
+
+type StateWrite = { key: string; value: unknown; ifVersion?: number }
+
+// A write to the session state a `clear` left: compared with the version that
+// stands, where a value never written stands at 0, and landing above every
+// version before it.
+function clearedWrite(
+  cleared: Map<string, { value: unknown; version: number }>,
+  heard: { lastVersion: number },
+  e: StateWrite,
+): never {
+  const version = cleared.get(e.key)?.version ?? 0
+  if (e.ifVersion !== undefined && e.ifVersion !== version) {
+    return { value: { isSet: false, version } } as never
+  }
+  cleared.set(e.key, { value: e.value, version: heard.lastVersion + 1 })
+  return { value: { isSet: true, version: heard.lastVersion + 1 } } as never
+}
+
+// What a `/clear`, or a resume inside Claude Code, does beneath the mod: the
+// session goes on under a new id whose state is empty, and no session start
+// follows. The redraw that Claude Code makes then is the test's to make.
+function clear(heard: ReturnType<typeof worldOf>): void {
+  heard.cleared = new Map()
 }
 
 // Starts the session and lets the restore, which never holds the start up,
@@ -3001,5 +3065,213 @@ describe('the look of each state, as drawn', () => {
     expect(fade.frame).toEqual({ ...FRAME, borderColor: 'warning' })
     await heard.clock.advance(5_000)
     expect((await lookOf(band)).styleOf(/^✓ YOUR TURN$/)).toEqual(HEADING)
+  })
+})
+
+// A session already played: its game's score is 76.
+const PLAYED: Kept = {
+  shape: MODEL_SHAPE,
+  value: {
+    ...INITIAL_MODEL,
+    isOn: true,
+    isSeeded: true,
+    game: {
+      cells: [64, 8, 4, ...new Array<number>(13).fill(0)],
+      score: 76,
+      best: 76,
+      isOver: false,
+      hasWon: false,
+      moves: 21,
+    },
+  },
+}
+
+function tilesOf(heard: ReturnType<typeof worldOf>): number {
+  return heard.state?.value.game.cells.filter(value => value !== 0).length ?? 0
+}
+
+// The scores the board draws under its tiles, as drawn now; undefined while no
+// board is drawn.
+async function scoresOf(band: BoardBand): Promise<string | undefined> {
+  await settle()
+  await band.redraw()
+  const key = (await band.find({ type: 'Client' }))?.key
+  if (key === undefined) return undefined
+  return textsOf(await band.drawn({ in: key }))
+    .map(drawn => drawn.text)
+    .find(text => text.startsWith('score '))
+}
+
+describe('after a /clear or a resume inside Claude Code', () => {
+  test('a game that was on is back at once, as in a new session: two tiles and the kept best', async ($, on) => {
+    const heard = worldOf(on, { isOn: true, best: 4436 }, PLAYED)
+    await start($)
+    const band = await boardBand($)
+    expect(await scoresOf(band)).toBe('score 76 · best 4436')
+    for (const time of ['first', 'second']) {
+      const reads = heard.storeReads.length
+      clear(heard)
+      await band.redraw()
+      expect(
+        await band.find({ text: /Claude Code's own band/ }),
+        `${time} /clear`,
+      ).toBeDefined()
+      expect(await scoresOf(band), `${time} /clear`).toBe('score 0 · best 4436')
+      expect(await band.find({ text: /No activity yet/ })).toBeDefined()
+      expect(tilesOf(heard)).toBe(2)
+      expect(heard.state?.value.turn.phase).toBe('idle')
+      expect(heard.storeReads.slice(reads)).toEqual(['isOn', 'best'])
+    }
+  })
+
+  test('a game that was off stays off, and /fortywait shows a new game with the kept best', async ($, on) => {
+    const heard = worldOf(on, { isOn: false, best: 4436 })
+    await start($)
+    clear(heard)
+    expect(await toggle($)).toContain('Twenty Forty-Wait on')
+    expect(tilesOf(heard)).toBe(2)
+    expect(heard.state?.value.game.best).toBe(4436)
+    expect(heard.writes).toEqual([{ key: 'isOn', value: true }])
+  })
+
+  test('the next event restores it first, and the band follows that turn', async ($, on) => {
+    const heard = worldOf(on, { isOn: true, best: 4436 })
+    await start($)
+    clear(heard)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await settle()
+    expect(heard.state?.value.isOn).toBe(true)
+    expect(tilesOf(heard)).toBe(2)
+    expect(heard.state?.value.game.best).toBe(4436)
+    expect(heard.state?.value.turn).toMatchObject({
+      turnId: 't1',
+      phase: 'running',
+    })
+  })
+
+  test('with no /clear nothing is restored again: draws, a turn and toggles read nothing kept', async ($, on) => {
+    const heard = worldOf(on, { isOn: true, best: 4436 })
+    await start($)
+    const reads = heard.storeReads.length
+    const band = await mounted($)
+    expect(await shows(band, /No activity yet/)).toBe(true)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    expect(await shows(band, /Claude is working/)).toBe(true)
+    await $.turn.complete(ending('t1'))
+    expect(await shows(band, /YOUR TURN/)).toBe(true)
+    await toggle($)
+    await toggle($)
+    expect(await shows(band, /No activity yet/)).toBe(true)
+    expect(heard.storeReads.length).toBe(reads)
+  })
+
+  test('/fortywait right after acts on the restored game: one that was on turns off', async ($, on) => {
+    const heard = worldOf(on, { isOn: true, best: 4436 })
+    await start($)
+    clear(heard)
+    expect(await toggle($)).toContain('Twenty Forty-Wait off')
+    expect(tilesOf(heard)).toBe(2)
+    expect(heard.writes).toEqual([{ key: 'isOn', value: false }])
+  })
+
+  test('the band redraws itself once restored, with no other draw asked for', async ($, on) => {
+    const heard = worldOf(on, { isOn: true, best: 4436 })
+    await start($)
+    const band = await boardBand($)
+    clear(heard)
+    await band.redraw()
+    await settle()
+    expect(await band.find({ text: /No activity yet/ })).toBeDefined()
+    expect(tilesOf(heard)).toBe(2)
+  })
+
+  for (const phase of ['running', 'fading'] as const) {
+    test(`a game ${phase === 'running' ? 'played while Claude works' : 'fading after a long turn'} comes back idle, the keys in the prompt and no clock running`, async ($, on) => {
+      const heard = worldOf(on, { isOn: true, best: 4436 })
+      await start($)
+      await $.turn.start({ text: 'go', turnId: 't1' })
+      const band = await boardBand($)
+      await clickBoard(band)
+      expect(heard.state?.value.mode).toBe('game')
+      await heard.clock.advance(12_000)
+      // The band's clock runs while Claude works.
+      expect(heard.periods).toBeGreaterThan(10)
+      if (phase === 'fading') {
+        await $.turn.complete(ending('t1'))
+        expect((await lookOf(band)).styleOf(/the board locks in/)).toBeDefined()
+      }
+      clear(heard)
+      await band.redraw()
+      await settle()
+      expect(heard.state?.value).toMatchObject({ isOn: true, mode: 'input' })
+      expect(heard.state?.value.turn.phase).toBe('idle')
+      expect(tilesOf(heard)).toBe(2)
+      const reads = heard.stateReads
+      const periods = heard.periods
+      await heard.clock.advance(10_000)
+      expect(heard.periods).toBe(periods)
+      expect(heard.stateReads).toBe(reads)
+      expect((await lookOf(band)).styleOf(/No activity yet/)).toBeDefined()
+    })
+  }
+
+  test('a restore that fails on a tick stops the band, and once it is back its clock runs again', async ($, on) => {
+    const heard = worldOf(on, { isOn: true, best: 4436 })
+    await start($)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    const band = await mounted($)
+    clear(heard)
+    heard.isModelUnwritable = true
+    await heard.clock.advance(1_000)
+    expect(await shows(band, /Claude is working|No activity yet/)).toBe(false)
+    heard.isModelUnwritable = false
+    await $.turn.start({ text: 'again', turnId: 't2' })
+    await settle()
+    await heard.clock.advance(3_000)
+    expect(await shows(band, /Claude is working · 3s/)).toBe(true)
+  })
+
+  test('while a restore waits in line, more draws ask for no other', async ($, on) => {
+    const heard = worldOf(on, { isOn: true, best: 4436 })
+    await start($)
+    const band = await boardBand($)
+    // The state reads a /clear costs while its restore is held up on the store
+    // and the band is drawn this many times.
+    const readsOf = async (draws: number) => {
+      clear(heard)
+      let release = () => {}
+      heard.heldReads.set(
+        'isOn',
+        new Promise<void>(resolve => {
+          release = resolve
+        }),
+      )
+      const before = heard.stateReads
+      await band.redraw()
+      await settle()
+      for (let draw = 1; draw < draws; draw += 1) await band.redraw()
+      await settle()
+      release()
+      await settle()
+      expect(tilesOf(heard)).toBe(2)
+      return heard.stateReads - before
+    }
+    const once = await readsOf(1)
+    // Only the three more draws' own reads: no restore asked for again.
+    expect(await readsOf(4)).toBe(once + 3)
+  })
+
+  test('a fresh install shows and writes nothing, and /fortywait then deals', async ($, on) => {
+    const heard = worldOf(on)
+    await start($)
+    const band = await boardBand($)
+    clear(heard)
+    await band.redraw()
+    expect(await scoresOf(band)).toBeUndefined()
+    expect(await band.find({ text: /No activity yet/ })).toBeUndefined()
+    expect(heard.writes).toEqual([])
+    expect(await toggle($)).toContain('Twenty Forty-Wait on')
+    expect(tilesOf(heard)).toBe(2)
+    expect(await scoresOf(band)).toBe('score 0 · best 0')
   })
 })
