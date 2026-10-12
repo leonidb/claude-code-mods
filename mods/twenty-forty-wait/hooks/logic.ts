@@ -266,10 +266,11 @@ export function afterToggle(model: Model): Step {
 }
 
 /**
- * A session starts, or the mod reloads. The session's own on/off stands; only
- * a session that has none yet takes it from the store, on if it was last
- * switched on. The best score is the higher of the kept one and the model's,
- * and a best the store doesn't have yet (its save failed) is saved again.
+ * A session starts, the mod reloads, or Claude Code emptied the session's
+ * state (see `isDealt`). The session's own on/off stands; only a session that
+ * has none yet takes it from the store, on if it was last switched on. The
+ * best score is the higher of the kept one and the model's, and a best the
+ * store doesn't have yet (its save failed) is saved again.
  * A session with no game yet gets a new one; a reload keeps the game as it
  * was, with no new tile. A reload also drops any board that held the keys, so
  * the keys are the prompt's and the board is retired, and new code gets a
@@ -297,6 +298,16 @@ export function afterRestore(
         ? [{ kind: 'save', key: 'best', value: best }]
         : [],
   }
+}
+
+/**
+ * Whether the game has its tiles. Every restore deals, and nothing after it
+ * takes the last tile away, so a board without tiles, once restored, means
+ * Claude Code emptied the session's state: a `/clear` or a resume inside
+ * Claude Code, which no session start follows.
+ */
+export function isDealt(game: Game): boolean {
+  return game.cells.some(value => value !== 0)
 }
 
 /** What `/fortywait` answers. */
@@ -1492,9 +1503,7 @@ function plural(count: number, noun: string): string {
 }
 
 function dealt(game: Game, random: Random): Game {
-  return game.cells.some(value => value !== 0)
-    ? game
-    : newGame(game.best, random)
+  return isDealt(game) ? game : newGame(game.best, random)
 }
 
 // The 16 tiles of a kept board, or null when it isn't one. Array.from reads
