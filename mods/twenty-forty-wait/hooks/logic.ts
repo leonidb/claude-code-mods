@@ -919,14 +919,16 @@ export type StatusView = {
 
 /**
  * Where the band is drawn: its body columns, the rows the engine lets it take,
- * whether the terminal is fullscreen (unknown counts as not), and whether a
- * Claude Code survey holds the band.
+ * whether the terminal is fullscreen (unknown counts as not), whether a
+ * Claude Code survey holds the band, and the rows other mods' content above
+ * the game takes, none when there is none.
  */
 export type Room = {
   columns: number
   maxRows: number
   isFullscreen?: boolean
   hasSurvey?: boolean
+  others?: number
 }
 
 /**
@@ -1119,16 +1121,21 @@ export function statusOf(
  * The band for this moment and this room. Off, after a fault, or while a
  * survey holds the band, it draws nothing. With room it
  * draws the board beside the live view or the card, or above it when narrow;
- * without room the whole band shrinks to one line.
+ * without room the whole band shrinks to one line. Under other mods' content
+ * the game has the rows left, by the same rule, and with not one row left
+ * it draws nothing.
  */
 export function bandOf(model: Model, now: number, room: Room): BandView {
   if (!model.isOn || model.isFaulted || room.hasSurvey === true) {
     return { kind: 'none' }
   }
+  const others = Math.max(0, room.others ?? 0)
+  if (others > 0 && room.maxRows - others < 1) return { kind: 'none' }
+  const left = others > 0 ? { ...room, maxRows: room.maxRows - others } : room
   const isCardShown = isLocked(model, now)
   const direction = room.columns >= ROW_COLUMNS ? 'row' : 'column'
   const isRoomy =
-    fits(bandRowsOf(direction), room) && room.columns >= BOARD_COLUMNS
+    fits(bandRowsOf(direction), left) && room.columns >= BOARD_COLUMNS
   if (!isRoomy) {
     // The hint comes right after the state, so the band cuts what follows it
     // rather than the hint. The fade's banner takes the form that leaves the
@@ -1222,6 +1229,45 @@ export function handoffOf(model: Model, view: BandView): number | null {
   return model.mode === 'game' && view.kind !== 'full'
     ? model.board.epoch
     : null
+}
+
+// Other mods' content
+
+/**
+ * About the rows what's beneath the band takes at `columns`: a text its lines
+ * wrapped, a column of children their sum, a row the tallest, Claude Code's
+ * own node (`type: 'engine'`, which draws nothing while no survey shows)
+ * none, anything else one. Where it falls short, Claude Code scrolls the band.
+ */
+export function rowsTakenOf(tree: unknown, columns: number): number {
+  const width = Math.max(1, Math.floor(columns))
+  if (typeof tree === 'string' || typeof tree === 'number') {
+    return String(tree)
+      .split('\n')
+      .reduce(
+        (sum, line) =>
+          sum + Math.max(rowsOf(line, width), Math.ceil(line.length / width)),
+        0,
+      )
+  }
+  if (Array.isArray(tree)) {
+    return tree.reduce<number>((sum, each) => sum + rowsTakenOf(each, width), 0)
+  }
+  if (!isRecord(tree) || tree.type === 'engine') return 0
+  if (tree.type === 'Text') return rowsTakenOf(wordsOf(tree.children), width)
+  if (tree.type !== 'Box' || !Array.isArray(tree.children)) return 1
+  const direction = isRecord(tree.props) ? tree.props.flexDirection : undefined
+  const isColumn = String(direction ?? 'row').startsWith('column')
+  return tree.children
+    .map(each => rowsTakenOf(each, width))
+    .reduce((rows, each) => (isColumn ? rows + each : Math.max(rows, each)), 0)
+}
+
+// A text's words, its nested texts' included.
+function wordsOf(tree: unknown): string {
+  if (typeof tree === 'string' || typeof tree === 'number') return String(tree)
+  if (Array.isArray(tree)) return tree.map(wordsOf).join('')
+  return isRecord(tree) ? wordsOf(tree.children) : ''
 }
 
 /** A short line for a tool call: the tool and what it works on; Bash shows its description, never the command. */

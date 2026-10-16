@@ -16,6 +16,24 @@ export type BandElements = Pick<
 >
 
 /**
+ * Draws what's beneath the band as it came, on top, and the band's own tree
+ * under it, right above the prompt. Nothing is decided here.
+ */
+export function stackedTree(
+  ui: BandElements,
+  below: RenderElement,
+  own: RenderElement,
+): RenderElement {
+  const { Box } = ui
+  return (
+    <Box flexDirection="column">
+      {below}
+      {own}
+    </Box>
+  )
+}
+
+/**
  * Draws the band's view as it is: the board beside the card or the live
  * view, or above it when narrow, and the mode row at the bottom, unless it
  * has nothing to say. Each text is one row of its own, cut at the band's

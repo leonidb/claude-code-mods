@@ -38,6 +38,7 @@ import {
   isTimeShown,
   modeOf,
   modelOf,
+  rowsTakenOf,
   paragraphOf,
   placeholderOf,
   statusOf,
@@ -53,6 +54,7 @@ import type {
   BoardInput,
   BoardPost,
   CardView,
+  Room,
   TurnEnd,
 } from '../../hooks/logic'
 import type { Game, Model } from '../../types'
@@ -3169,5 +3171,40 @@ describe('the card wraps the summary over the rows it has', () => {
         ).toBeLessThanOrEqual(side)
       }
     }
+  })
+})
+
+describe('other mods’ content above the band', () => {
+  const ENGINE = { type: 'engine', ref: 1 }
+  const el = (type: string, ...children: unknown[]) => ({ type, children })
+  const column = (...children: unknown[]) => ({
+    ...el('Box', ...children),
+    props: { flexDirection: 'column' },
+  })
+
+  test('a text takes its lines wrapped, a column the sum, a row the tallest, anything else a row', () => {
+    const four = el('Text', 'one two three four')
+    expect(
+      rowsTakenOf(el('Text', 'a\nb', el('Text', 'x'.repeat(25))), 10),
+    ).toBe(4)
+    expect(rowsTakenOf(column(four, el('Button'), ENGINE), 9)).toBe(4)
+    expect(rowsTakenOf(el('Box', four, el('Button')), 9)).toBe(3)
+    expect(rowsTakenOf([el('Text', 'a'), 'b'], 40)).toBe(2)
+    expect(rowsTakenOf(ENGINE, 40)).toBe(0)
+  })
+
+  test('under others the game has the rows left by the same fit, and with none left nothing', () => {
+    const room = { columns: 100, maxRows: 10, isFullscreen: true }
+    const kindAt = (change: Partial<Room>) =>
+      bandOf(started(), 2000, { ...room, ...change }).kind
+    expect(kindAt({ others: 2 })).toBe('full')
+    expect(kindAt({ others: 9 })).toBe('minimized')
+    expect(kindAt({ others: 10 })).toBe('none')
+    expect(kindAt({ maxRows: 30, isFullscreen: false, others: 7 })).toBe(
+      'minimized',
+    )
+    // With no others, as before, even with no row at all.
+    expect(kindAt({ maxRows: 0 })).toBe('minimized')
+    expect(kindAt({ others: 0 })).toBe('full')
   })
 })
