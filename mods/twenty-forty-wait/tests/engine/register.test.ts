@@ -9,6 +9,17 @@ tier('user')
 
 type Kept = { shape: string; value: Model }
 
+// Claude Code's own node in a band's tree, which draws nothing while no
+// survey shows.
+const ENGINE = { type: 'engine', ref: 1 }
+
+// The game's own tree, drawn under what's beneath it.
+function ownOf(drawn: unknown): { children: unknown[] } {
+  return (drawn as { children: unknown[] }).children.at(-1) as {
+    children: unknown[]
+  }
+}
+
 // Lets the work under way finish before a test looks: the band's model moves
 // one step after another, behind the events it watches.
 let settle: () => Promise<void> = () => Promise.resolve()
@@ -73,6 +84,8 @@ function worldOf(
     // The periods every interval of the mod's has asked for, counted.
     periods: 0,
     clock: mock.clock(periodsCounted(on, () => (heard.periods += 1))),
+    // What's drawn beneath the band.
+    beneath: 'engine' as 'engine' | 'sentinel',
   }
   let older = olderState
   settle = () => heard.clock.settle()
@@ -202,12 +215,25 @@ function worldOf(
     receive('classic.PermissionRequest', e)
     return {} as never
   })
-  // Claude Code's own band, drawn when the mod passes.
+  // What's beneath the band: Claude Code's own node, as the engine hands it
+  // to the band's render, or with `beneath` 'sentinel' another mod's line
+  // and button drawn over that node, as a mod beneath this one draws them.
   on('ui.render', ($, e) => {
-    const ui = $.ui.resolve(e as never) as unknown as {
-      Text: (props: { children: string }) => unknown
-    }
-    return ui.Text({ children: "Claude Code's own band" }) as never
+    if (heard.beneath === 'engine') return ENGINE as never
+    type Element = (props: object) => unknown
+    const ui = $.ui.resolve(e as never) as unknown as Record<
+      'Box' | 'Text' | 'Button',
+      Element
+    >
+    const button = { key: 'sentinel', label: 'sentinel button', onPress() {} }
+    return ui.Box({
+      flexDirection: 'column',
+      children: [
+        ui.Text({ children: 'sentinel meter' }),
+        ui.Button(button),
+        ENGINE,
+      ],
+    }) as never
   })
   return heard
 }
@@ -2503,7 +2529,7 @@ describe('the whole branch, after the second look', () => {
     // its old board must not be drawn.
     worldOf(on, { isOn: true }, SCORING)
     const early = await boardBand($)
-    expect(await early.find({ text: /Claude Code's own band/ })).toBeDefined()
+    expect(await early.drawn()).toEqual(ENGINE)
     expect(await early.find({ type: 'Client' })).toBeUndefined()
     await start($)
     // The drawing already on screen comes back by itself once restored: no
@@ -2887,7 +2913,7 @@ describe('the look of each state, as drawn', () => {
       expect(heard.state?.value.mode).toBe('game')
       await band.redraw()
       expect(await band.find({ text: /^● GAME · arrows play/ })).toBeDefined()
-      const playing = (await band.drawn()) as { children: unknown[] }
+      const playing = ownOf(await band.drawn())
       const playingRows = await heightOf(band, playing)
       expect(playingRows).toBe((await heightOf(band, playing.children[0])) + 1)
 
@@ -2897,7 +2923,7 @@ describe('the look of each state, as drawn', () => {
       await settle()
       await band.redraw()
       expect(await band.find({ text: /^✓ YOUR TURN/ })).toBeDefined()
-      const locked = (await band.drawn()) as { children: unknown[] }
+      const locked = ownOf(await band.drawn())
       const parts = locked.children.filter(
         child => child !== null && child !== undefined && child !== false,
       )
@@ -3112,10 +3138,7 @@ describe('after a /clear or a resume inside Claude Code', () => {
       const reads = heard.storeReads.length
       clear(heard)
       await band.redraw()
-      expect(
-        await band.find({ text: /Claude Code's own band/ }),
-        `${time} /clear`,
-      ).toBeDefined()
+      expect(await band.drawn(), `${time} /clear`).toEqual(ENGINE)
       expect(await scoresOf(band), `${time} /clear`).toBe('score 0 · best 4436')
       expect(await band.find({ text: /No activity yet/ })).toBeDefined()
       expect(tilesOf(heard)).toBe(2)
@@ -3274,4 +3297,76 @@ describe('after a /clear or a resume inside Claude Code', () => {
     expect(tilesOf(heard)).toBe(2)
     expect(await scoresOf(band)).toBe('score 0 · best 0')
   })
+})
+
+describe('other mods above the band', () => {
+  async function bandOn($: unknown, surface: string, change: object = {}) {
+    const ui = ($ as { ui: { mount: (e: unknown) => Promise<unknown> } }).ui
+    const props = { ...BAND.props, ...change }
+    return (await ui.mount({ ...BAND, surface, props })) as BoardBand
+  }
+
+  // What's drawn, as it came: each drawing numbers its presses anew.
+  async function drawnAt($: unknown, surface: string, change: object = {}) {
+    const band = await bandOn($, surface, change)
+    await settle()
+    await band.redraw()
+    const drawn = JSON.stringify(await band.drawn())
+    return drawn.replace(/"handle":\d+/g, '"handle":0')
+  }
+
+  for (const surface of ['terminal', 'desktop']) {
+    test(`on ${surface}, the game draws under what's beneath, as it came: Claude Code's node alone, or a mod's drawing`, async ($, on) => {
+      const heard = worldOf(on, { isOn: true })
+      await start($)
+      await $.turn.start({ text: 'go', turnId: 't1' })
+      const alone = JSON.parse(await drawnAt($, surface))
+      expect(alone.props).toEqual({ flexDirection: 'column' })
+      expect(alone.children[0]).toEqual(ENGINE)
+      expect(alone.children[1].props).toMatchObject({ flexGrow: 1 })
+      heard.beneath = 'sentinel'
+      const { props, children } = JSON.parse(await drawnAt($, surface))
+      expect(props).toEqual({ flexDirection: 'column' })
+      const types = children[0].children.map(
+        (each: { type: string }) => each.type,
+      )
+      expect(types).toEqual(['Text', 'Button', 'engine'])
+      expect(children[1]).toEqual(alone.children[1])
+    })
+
+    test(`on ${surface}, before the restore, under a survey and off, what's beneath is left as it came`, async ($, on) => {
+      const heard = worldOf(on, { isOn: true })
+      heard.beneath = 'sentinel'
+      const beneath = await drawnAt($, surface)
+      expect(beneath).toMatch(/sentinel meter.*sentinel button.*"engine"/)
+      await start($)
+      expect(await drawnAt($, surface, { hasSurvey: true })).toBe(beneath)
+      await toggle($)
+      expect(await drawnAt($, surface)).toBe(beneath)
+      heard.beneath = 'engine'
+      expect(await drawnAt($, surface)).toBe(JSON.stringify(ENGINE))
+    })
+
+    test(`on ${surface}, with fewer rows, the game's one line under what's beneath, or that alone and the keys at the prompt`, async ($, on) => {
+      const heard = worldOf(on, { isOn: true })
+      heard.beneath = 'sentinel'
+      const beneath = await drawnAt($, surface)
+      await start($)
+      await $.turn.start({ text: 'go', turnId: 't1' })
+      await clickBoard(await bandOn($, surface))
+      expect(heard.state?.value.mode).toBe('game')
+      // The mod's 2 rows take every row, and at 10 columns, wrapped, all 3.
+      expect(await drawnAt($, surface, { maxRows: 2 })).toBe(beneath)
+      const wrapped = { maxRows: 3, bodyColumns: 10 }
+      expect(await drawnAt($, surface, wrapped)).toBe(beneath)
+      expect(heard.state?.value.mode).toBe('input')
+      // A third of the 18 rows left is too few for the board.
+      const narrow = await drawnAt($, surface, { maxRows: 20 })
+      expect(narrow).toMatch(/sentinel meter.*more rows show the game/)
+      heard.beneath = 'engine'
+      const alone = await drawnAt($, surface, { maxRows: 20 })
+      expect(alone).toMatch(/^\{"type":"Box".*"engine".*more rows show/)
+      expect(alone).not.toContain('sentinel')
+    })
+  }
 })

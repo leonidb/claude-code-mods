@@ -1,8 +1,13 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type {
+  EngineInterface,
+  Register,
+  RenderElement,
+  RenderInput,
+} from 'claude-code'
 
 import type { Model } from '../types'
-import { bandTree } from './band'
+import { bandTree, stackedTree } from './band'
 import {
   INITIAL_MODEL,
   MODEL_SHAPE,
@@ -27,6 +32,7 @@ import {
   isTicking,
   isTimeShown,
   modelOf,
+  rowsTakenOf,
   toggleNoteOf,
   toolSucceeded,
   turnKeyOf,
@@ -316,6 +322,42 @@ async function keptValue($: EngineInterface, key: string): Promise<unknown> {
   }
 }
 
+// The band as drawn for this render: what's beneath it on top, as it came,
+// and the game in the rows left under it, or what's beneath alone when the
+// game isn't drawn.
+async function drawn(
+  $: EngineInterface,
+  load: Load,
+  e: RenderInput<'AbovePrompt'>,
+  current: Model,
+  below: RenderElement,
+): Promise<RenderElement> {
+  const view = bandOf(current, await read($, now), {
+    columns: e.props.bodyColumns,
+    maxRows: e.props.maxRows,
+    isFullscreen: e.viewport?.isFullscreen,
+    hasSurvey: e.props.hasSurvey,
+    others: rowsTakenOf(below, e.props.bodyColumns),
+  })
+  // Drawing can't write; a board that held the keys but isn't drawn is
+  // handed back right after, once per board.
+  const epoch = handoffOf(current, view)
+  if (epoch !== null && load.handoffWaiting !== epoch) {
+    load.handoffWaiting = epoch
+    $.clock.after(0, () => {
+      observe($, load, async at => {
+        load.handoffWaiting = undefined
+        await commit($, latest => afterHandoff(latest, epoch))
+        await settled($, load, at)
+      })
+    })
+  }
+  if (view.kind === 'none') return below
+  const ui = $.ui.resolve(e) as Parameters<typeof bandTree>[0]
+  const own = bandTree(ui, view)
+  return stackedTree(ui, below, own)
+}
+
 /**
  * Wires the mod into Claude Code. At each session start or reload it offers
  * `/fortywait` and restores the kept choice, and restores again when Claude
@@ -511,34 +553,26 @@ export const register: Register = on => {
       }
       return next(e)
     }
-    const view = bandOf(current, await read($, now), {
-      columns: e.props.bodyColumns,
-      maxRows: e.props.maxRows,
-      isFullscreen: e.viewport?.isFullscreen,
-      hasSurvey: e.props.hasSurvey,
-    })
-    // Drawing can't write; a board that held the keys but isn't drawn is
-    // handed back right after, once per board.
-    const epoch = handoffOf(current, view)
-    if (epoch !== null && load.handoffWaiting !== epoch) {
-      load.handoffWaiting = epoch
+    // What other mods draw beneath this one stays, on top, and the game has
+    // the rows left under it.
+    const below = await next(e)
+    try {
+      return await drawn($, load, e, current, below)
+    } catch {
+      // The band's own drawing failed, after what's beneath was drawn:
+      // Claude Code draws that alone, and the board stops, right after.
       $.clock.after(0, () => {
-        observe($, load, async at => {
-          load.handoffWaiting = undefined
-          await commit($, latest => afterHandoff(latest, epoch))
-          await settled($, load, at)
-        })
+        observe($, load, () => faulted($, load))
       })
+      return below
     }
-    return view.kind === 'none'
-      ? next(e)
-      : bandTree($.ui.resolve(e) as Parameters<typeof bandTree>[0], view)
   }).catch(($, e, next) => {
     // The band's own drawing failed: Claude Code draws its own, and the board
     // stops, right after. A failure beneath, once handed on, is not ours, nor
     // is a re-entry (read as a string: older Claude Code types list the kinds
-    // differently).
-    if (!next.called && String(next.error.kind) !== 're-entry') {
+    // differently); a timeout always is, as only the hook's own time counts.
+    const kind = String(next.error.kind)
+    if ((!next.called || kind === 'timeout') && kind !== 're-entry') {
       $.clock.after(0, () => {
         observe($, load, () => faulted($, load))
       })
