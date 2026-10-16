@@ -1,7 +1,7 @@
 {
   "name": "twenty-forty-wait",
   "displayName": "Twenty Forty-Wait",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A 2048 game above the prompt to keep your attention in Claude Code while it works, with a live view of Claude's work and a your-turn card when it stops.",
   "author": {
     "name": "Leonid Bakaleynik"
